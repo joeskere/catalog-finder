@@ -187,8 +187,9 @@
 </div>
 
 <script>
-  const ML_APP_ID = '2628228076253976';
-  const ML_SITE  = 'MLA'; // Argentina
+  
+  const ML_SITE = 'MLA';
+  const VERCEL  = 'https://powercase-seo.vercel.app';
 
   function setLoading(on, text, sub) {
     document.getElementById('loading').classList.toggle('visible', on);
@@ -208,11 +209,17 @@
 
   // ── ML API helpers ──────────────────────────────────────────────────────────
 
+  // -- ML API -- proxy por Vercel para evitar 403
   async function mlGet(url) {
-    const sep = url.includes('?') ? '&' : '?';
-    const res = await fetch(url + sep + 'app_id=' + ML_APP_ID);
-    if (!res.ok) throw new Error(`ML API error ${res.status}: ${url}`);
-    return res.json();
+    const res = await fetch(VERCEL + '/api/ml', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    if (!res.ok) throw new Error('ML proxy error ' + res.status);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    return data;
   }
 
   // Buscar items por query o EAN, filtrando solo catalog listings
