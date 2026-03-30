@@ -189,7 +189,7 @@
 <script>
   
   const ML_SITE = 'MLA';
-  const VERCEL  = 'https://powercase-seo.vercel.app';
+  const VERCEL  = 'https://catalog-finder.vercel.app';
 
   function setLoading(on, text, sub) {
     document.getElementById('loading').classList.toggle('visible', on);
@@ -327,7 +327,7 @@ Respondé SOLO con este JSON (sin backticks, sin texto extra):
   "resumen": "1-2 oraciones explicando qué encontraste y cuál es la mejor opción para el usuario"
 }`;
 
-    const res = await fetch('https://powercase-seo.vercel.app/api/analyze', {
+    const res = await fetch('https://catalog-finder.vercel.app/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt })
