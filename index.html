@@ -222,54 +222,105 @@
     return data;
   }
 
-  // Buscar items por query o EAN
+  // Buscar catalog products directamente por nombre/EAN
   async function searchItems(query, ean) {
-    const results = [];
+    const catalogIds = new Set();
+    const catalogDetails = {};
 
-    // Búsqueda por EAN si está disponible
-    if (ean && ean.trim()) {
-      try {
-        setLoading(true, 'Buscando por EAN...', 'Identificando el producto exacto');
-        const data = await mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(ean.trim())}&limit=20`);
-        if (data.results) results.push(...data.results);
-      } catch(e) { console.warn('EAN search failed', e); }
-    }
+    setLoading(true, 'Buscando catálogos en ML...', 'Consultando el endpoint de catálogos');
 
-    // Búsqueda por nombre — dos pasadas para más cobertura
-    setLoading(true, 'Buscando en MercadoLibre...', 'Analizando catálogos disponibles');
-    const [r1, r2] = await Promise.allSettled([
+    // 1. Buscar catalog_products directamente por nombre
+    const searches = [
       mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(query.trim())}&limit=50`),
       mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(query.trim())}&limit=50&offset=50`)
-    ]);
-    if (r1.status === 'fulfilled' && r1.value.results) results.push(...r1.value.results);
-    if (r2.status === 'fulfilled' && r2.value.results) results.push(...r2.value.results);
+    ];
 
-    // Quedarse solo con los que tienen catalog_product_id (son catalog listings)
-    const catalogOnly = results.filter(r => r.catalog_product_id);
+    // 2. Si hay EAN, búsqueda adicional por EAN
+    if (ean && ean.trim()) {
+      searches.push(mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(ean.trim())}&limit=20`));
+    }
 
-    // Deduplicar por catalog_product_id
-    const seen = new Set();
-    return catalogOnly.filter(r => {
-      const key = r.catalog_product_id || r.id;
-      if (seen.has(key)) return false;
-      seen.add(key); return true;
+    const settled = await Promise.allSettled(searches);
+    const allItems = [];
+    settled.forEach(r => {
+      if (r.status === 'fulfilled' && r.value.results) allItems.push(...r.value.results);
     });
+
+    // Extraer catalog_product_ids de los resultados normales
+    allItems.forEach(item => {
+      if (item.catalog_product_id) catalogIds.add(item.catalog_product_id);
+    });
+
+    // 3. Buscar catalog_products directamente con el endpoint dedicado
+    try {
+      const cpSearch = await mlGet(`https://api.mercadolibre.com/products/search?site_id=${ML_SITE}&q=${encodeURIComponent(query.trim())}&limit=20`);
+      if (cpSearch.results) {
+        cpSearch.results.forEach(cp => { if (cp.id) catalogIds.add(cp.id); });
+      }
+    } catch(e) { console.warn('catalog_products search failed', e); }
+
+    // 4. Si hay EAN, buscar por GTIN
+    if (ean && ean.trim()) {
+      try {
+        const gtinSearch = await mlGet(`https://api.mercadolibre.com/products/search?site_id=${ML_SITE}&q=${encodeURIComponent(ean.trim())}&limit=10`);
+        if (gtinSearch.results) {
+          gtinSearch.results.forEach(cp => { if (cp.id) catalogIds.add(cp.id); });
+        }
+      } catch(e) { console.warn('GTIN search failed', e); }
+    }
+
+    if (catalogIds.size === 0) return [];
+
+    setLoading(true, `${catalogIds.size} catálogos encontrados — obteniendo detalles...`, 'Consultando stock, ventas y competidores');
+
+    // 5. Obtener detalles de cada catalog_product
+    const detailPromises = [...catalogIds].slice(0, 20).map(async id => {
+      try {
+        // Obtener info del catalog product
+        const [cpDetail, listings] = await Promise.allSettled([
+          mlGet(`https://api.mercadolibre.com/catalog_products/${id}`),
+          mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?catalog_product_id=${id}&limit=20`)
+        ]);
+
+        const cp = cpDetail.status === 'fulfilled' ? cpDetail.value : null;
+        const listingResults = listings.status === 'fulfilled' ? (listings.value.results || []) : [];
+
+        // Construir objeto enriquecido
+        const totalSold = listingResults.reduce((s, l) => s + (l.sold_quantity || 0), 0);
+        const activeSellers = listingResults.filter(l => l.available_quantity > 0).length;
+        const minPrice = listingResults.length > 0 ? Math.min(...listingResults.map(l => l.price || 9999999)) : 0;
+        const hasStock = listingResults.some(l => l.available_quantity > 0);
+        const permalink = listingResults[0]?.permalink || (cp ? `https://www.mercadolibre.com.ar/p/${id}` : '');
+        const thumbnail = listingResults[0]?.thumbnail || cp?.pictures?.[0]?.url || null;
+
+        return {
+          catalog_product_id: id,
+          id,
+          title: cp?.name || listingResults[0]?.title || id,
+          attributes: cp?.attributes || [],
+          sold_quantity: totalSold,
+          seller_count: activeSellers,
+          available_quantity: hasStock ? listingResults.reduce((s,l) => s + (l.available_quantity||0), 0) : 0,
+          price: minPrice === 9999999 ? 0 : minPrice,
+          permalink,
+          thumbnail,
+          status: hasStock ? 'active' : 'paused',
+          _listings: listingResults,
+          _cp: cp
+        };
+      } catch(e) {
+        console.warn('Detail fetch failed for', id, e);
+        return null;
+      }
+    });
+
+    const details = (await Promise.all(detailPromises)).filter(Boolean);
+    return details;
   }
 
-  // Obtener detalle de un catalog product
-  async function getCatalogProduct(catalogId) {
-    try {
-      return await mlGet(`https://api.mercadolibre.com/catalog_products/${catalogId}`);
-    } catch(e) { return null; }
-  }
-
-  // Obtener todos los listings de un catalog product
-  async function getCatalogListings(catalogId) {
-    try {
-      const data = await mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?catalog_product_id=${catalogId}&limit=50`);
-      return data.results || [];
-    } catch(e) { return []; }
-  }
+  // Stub — ya no se usa por separado, está integrado en searchItems
+  async function getCatalogProduct(catalogId) { return null; }
+  async function getCatalogListings(catalogId) { return []; }
 
   // ── Análisis de exactitud con IA ────────────────────────────────────────────
 
@@ -546,21 +597,16 @@ Respondé SOLO con este JSON (sin backticks, sin texto extra):
         return;
       }
 
-      setLoading(true, `${items.length} catálogos encontrados — analizando coincidencias...`, 'La IA está verificando marca, modelo, color y almacenamiento');
+      setLoading(true, `${items.length} catálogos encontrados — analizando con IA...`, 'Verificando que sea exactamente tu producto');
 
-      // 2. Obtener detalles de catálogos (top 10)
+      // 2. Los detalles ya vienen enriquecidos desde searchItems
       const catalogDetails = {};
-      const topItems = items.slice(0, 10);
-      await Promise.allSettled(topItems.map(async item => {
-        const cid = item.catalog_product_id;
-        if (cid) {
-          const detail = await getCatalogProduct(cid);
-          if (detail) catalogDetails[cid] = detail;
-        }
-      }));
+      items.forEach(item => {
+        if (item._cp) catalogDetails[item.id] = item._cp;
+      });
 
       // 3. Analizar coincidencias con IA
-      setLoading(true, 'Verificando exactitud del producto...', 'Comparando marca, modelo, color y almacenamiento');
+      setLoading(true, 'Analizando exactitud del producto...', 'La IA compara marca, modelo y especificaciones clave');
       const analysis = await analyzeMatch(name, ean, items);
 
       setLoading(false);
