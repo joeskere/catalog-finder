@@ -222,7 +222,7 @@
     return data;
   }
 
-  // Buscar items por query o EAN, filtrando solo catalog listings
+  // Buscar items por query o EAN
   async function searchItems(query, ean) {
     const results = [];
 
@@ -230,19 +230,26 @@
     if (ean && ean.trim()) {
       try {
         setLoading(true, 'Buscando por EAN...', 'Identificando el producto exacto');
-        const data = await mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(ean.trim())}&catalog_listing=true&limit=20`);
+        const data = await mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(ean.trim())}&limit=20`);
         if (data.results) results.push(...data.results);
       } catch(e) { console.warn('EAN search failed', e); }
     }
 
-    // Búsqueda por nombre
-    setLoading(true, 'Buscando por nombre...', 'Analizando catálogos disponibles');
-    const data = await mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(query.trim())}&catalog_listing=true&limit=50`);
-    if (data.results) results.push(...data.results);
+    // Búsqueda por nombre — dos pasadas para más cobertura
+    setLoading(true, 'Buscando en MercadoLibre...', 'Analizando catálogos disponibles');
+    const [r1, r2] = await Promise.allSettled([
+      mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(query.trim())}&limit=50`),
+      mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(query.trim())}&limit=50&offset=50`)
+    ]);
+    if (r1.status === 'fulfilled' && r1.value.results) results.push(...r1.value.results);
+    if (r2.status === 'fulfilled' && r2.value.results) results.push(...r2.value.results);
+
+    // Quedarse solo con los que tienen catalog_product_id (son catalog listings)
+    const catalogOnly = results.filter(r => r.catalog_product_id);
 
     // Deduplicar por catalog_product_id
     const seen = new Set();
-    return results.filter(r => {
+    return catalogOnly.filter(r => {
       const key = r.catalog_product_id || r.id;
       if (seen.has(key)) return false;
       seen.add(key); return true;
