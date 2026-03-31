@@ -279,18 +279,34 @@
         const listingResults = listings.status === 'fulfilled' ? (listings.value.results || []) : [];
 
         // Construir objeto enriquecido
-        const totalSold = listingResults.reduce((s, l) => s + (l.sold_quantity || 0), 0);
+        // Ventas: priorizar sold_quantity del catalog_product, luego sumar listings
+        const cpSold = cp?.sold_quantity || cp?.health?.sold_quantity || 0;
+        const listingsSold = listingResults.reduce((s, l) => s + (l.sold_quantity || 0), 0);
+        const totalSold = Math.max(cpSold, listingsSold);
+
         const activeSellers = listingResults.filter(l => l.available_quantity > 0).length;
-        const minPrice = listingResults.length > 0 ? Math.min(...listingResults.map(l => l.price || 9999999)) : 0;
+        const minPrice = listingResults.length > 0 ? Math.min(...listingResults.filter(l => l.price > 0).map(l => l.price || 9999999)) : 0;
         const hasStock = listingResults.some(l => l.available_quantity > 0);
-        const permalink = listingResults[0]?.permalink || (cp ? `https://www.mercadolibre.com.ar/p/${id}` : '');
-        const thumbnail = listingResults[0]?.thumbnail || cp?.pictures?.[0]?.url || null;
+
+        // Permalink: link al catálogo de ML
+        const permalink = `https://www.mercadolibre.com.ar/p/${id}`;
+        const thumbnail = cp?.pictures?.[0]?.url || listingResults[0]?.thumbnail || null;
+
+        // Enriquecer atributos con datos del cp
+        const attributes = cp?.attributes || cp?.main_features?.map(f => ({id: f.id, value_name: f.values?.[0]?.name})) || [];
+
+        console.log(`Catálogo ${id}:`, {
+          cpSold, listingsSold, totalSold,
+          activeSellers, hasStock,
+          cpName: cp?.name,
+          cpKeys: cp ? Object.keys(cp) : []
+        });
 
         return {
           catalog_product_id: id,
           id,
-          title: cp?.name || listingResults[0]?.title || id,
-          attributes: cp?.attributes || [],
+          title: cp?.name || cp?.short_name || listingResults[0]?.title || id,
+          attributes,
           sold_quantity: totalSold,
           seller_count: activeSellers,
           available_quantity: hasStock ? listingResults.reduce((s,l) => s + (l.available_quantity||0), 0) : 0,
