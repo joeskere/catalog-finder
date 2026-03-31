@@ -12,28 +12,12 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Obtener Access Token via OAuth client_credentials
-    const tokenRes = await fetch('https://api.mercadolibre.com/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: process.env.ML_APP_ID,
-        client_secret: process.env.ML_CLIENT_SECRET
-      })
-    });
+    // Agregar app_id como query param (autenticación básica sin OAuth)
+    const separator = url.includes('?') ? '&' : '?';
+    const urlWithApp = `${url}${separator}app_id=${process.env.ML_APP_ID}`;
 
-    let authHeader = '';
-    if (tokenRes.ok) {
-      const tokenData = await tokenRes.json();
-      authHeader = `Bearer ${tokenData.access_token}`;
-    }
-
-    const response = await fetch(url, {
-      headers: {
-        ...(authHeader ? { 'Authorization': authHeader } : {}),
-        'Accept': 'application/json'
-      }
+    const response = await fetch(urlWithApp, {
+      headers: { 'Accept': 'application/json' }
     });
 
     const data = await response.json();
