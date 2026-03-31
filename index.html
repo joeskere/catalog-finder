@@ -228,36 +228,39 @@
 
     setLoading(true, 'Buscando catálogos en ML...', 'Consultando el portal de catálogos');
 
-    // Estrategia 1: endpoint /products/search (el mismo que usa el portal de vendedores de ML)
-    const productSearches = [
-      mlGet(`https://api.mercadolibre.com/products/search?site_id=${ML_SITE}&q=${encodeURIComponent(query.trim())}&limit=20`),
-      mlGet(`https://api.mercadolibre.com/products/search?site_id=${ML_SITE}&q=${encodeURIComponent(query.trim())}&limit=20&offset=20`)
-    ];
-    if (ean && ean.trim()) {
-      productSearches.push(mlGet(`https://api.mercadolibre.com/products/search?site_id=${ML_SITE}&q=${encodeURIComponent(ean.trim())}&limit=10`));
-    }
-    const psResults = await Promise.allSettled(productSearches);
-    psResults.forEach(r => {
-      if (r.status === 'fulfilled') {
-        const results = r.value.results || r.value.products || [];
-        results.forEach(p => { if (p.id) catalogIds.add(p.id); });
-      }
-    });
+    // Generar variantes de búsqueda: nombre completo + versión corta (primeras 2-3 palabras)
+    const words = query.trim().split(/\s+/);
+    const shortQuery = words.slice(0, 3).join(' ');
+    const queries = [...new Set([query.trim(), shortQuery])];
 
-    // Estrategia 2: búsqueda normal extrayendo catalog_product_id
-    const searches = [
-      mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(query.trim())}&limit=50`),
-      mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(query.trim())}&limit=50&offset=50`)
-    ];
-    if (ean && ean.trim()) {
-      searches.push(mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(ean.trim())}&limit=20`));
+    const allSearches = [];
+
+    for (const q of queries) {
+      // Estrategia 1: /products/search (portal de vendedores ML)
+      allSearches.push(mlGet(`https://api.mercadolibre.com/products/search?site_id=${ML_SITE}&q=${encodeURIComponent(q)}&limit=20`));
+      allSearches.push(mlGet(`https://api.mercadolibre.com/products/search?site_id=${ML_SITE}&q=${encodeURIComponent(q)}&limit=20&offset=20`));
+      // Estrategia 2: búsqueda normal
+      allSearches.push(mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(q)}&limit=50`));
     }
-    const sResults = await Promise.allSettled(searches);
-    sResults.forEach(r => {
-      if (r.status === 'fulfilled' && r.value.results) {
-        r.value.results.forEach(item => {
-          if (item.catalog_product_id) catalogIds.add(item.catalog_product_id);
-        });
+
+    // Estrategia 3: EAN si disponible
+    if (ean && ean.trim()) {
+      allSearches.push(mlGet(`https://api.mercadolibre.com/products/search?site_id=${ML_SITE}&q=${encodeURIComponent(ean.trim())}&limit=10`));
+      allSearches.push(mlGet(`https://api.mercadolibre.com/sites/${ML_SITE}/search?q=${encodeURIComponent(ean.trim())}&limit=20`));
+    }
+
+    const allResults = await Promise.allSettled(allSearches);
+    allResults.forEach(r => {
+      if (r.status === 'fulfilled' && r.value) {
+        // /products/search devuelve results o products
+        const products = r.value.results || r.value.products || [];
+        products.forEach(p => { if (p.id) catalogIds.add(p.id); });
+        // /sites/search devuelve results con catalog_product_id
+        if (r.value.results) {
+          r.value.results.forEach(item => {
+            if (item.catalog_product_id) catalogIds.add(item.catalog_product_id);
+          });
+        }
       }
     });
 
@@ -278,28 +281,32 @@
         const cp = cpDetail.status === 'fulfilled' ? cpDetail.value : null;
         const listingResults = listings.status === 'fulfilled' ? (listings.value.results || []) : [];
 
-        // Construir objeto enriquecido
-        // Ventas: priorizar sold_quantity del catalog_product, luego sumar listings
-        const cpSold = cp?.sold_quantity || cp?.health?.sold_quantity || 0;
+        // Ventas: ML no expone sold_quantity por API pública
+        // Usamos los listings para obtener datos reales de precio, stock y competidores
         const listingsSold = listingResults.reduce((s, l) => s + (l.sold_quantity || 0), 0);
-        const totalSold = Math.max(cpSold, listingsSold);
+        const activeListings = listingResults.filter(l => l.available_quantity > 0 && l.status === 'active');
+        const activeSellers = activeListings.length;
+        const allPrices = activeListings.filter(l => l.price > 0).map(l => l.price);
+        const minPrice = allPrices.length > 0 ? Math.min(...allPrices) : 0;
+        const hasStock = activeListings.length > 0;
+        const totalStock = activeListings.reduce((s,l) => s + (l.available_quantity||0), 0);
 
-        const activeSellers = listingResults.filter(l => l.available_quantity > 0).length;
-        const minPrice = listingResults.length > 0 ? Math.min(...listingResults.filter(l => l.price > 0).map(l => l.price || 9999999)) : 0;
-        const hasStock = listingResults.some(l => l.available_quantity > 0);
-
-        // Permalink: link al catálogo de ML
+        // Permalink y thumbnail
         const permalink = `https://www.mercadolibre.com.ar/p/${id}`;
-        const thumbnail = cp?.pictures?.[0]?.url || listingResults[0]?.thumbnail || null;
+        const thumbnail = cp?.pictures?.[0]?.url || activeListings[0]?.thumbnail || listingResults[0]?.thumbnail || null;
 
-        // Enriquecer atributos con datos del cp
-        const attributes = cp?.attributes || cp?.main_features?.map(f => ({id: f.id, value_name: f.values?.[0]?.name})) || [];
+        // Atributos del catalog product
+        const attributes = cp?.attributes || [];
 
         console.log(`Catálogo ${id}:`, {
-          cpSold, listingsSold, totalSold,
-          activeSellers, hasStock,
-          cpName: cp?.name,
-          cpKeys: cp ? Object.keys(cp) : []
+          name: cp?.name,
+          listingsSold,
+          activeSellers,
+          minPrice,
+          hasStock,
+          totalStock,
+          listingsCount: listingResults.length,
+          activeCount: activeListings.length
         });
 
         return {
@@ -307,10 +314,10 @@
           id,
           title: cp?.name || cp?.short_name || listingResults[0]?.title || id,
           attributes,
-          sold_quantity: totalSold,
+          sold_quantity: listingsSold,
           seller_count: activeSellers,
-          available_quantity: hasStock ? listingResults.reduce((s,l) => s + (l.available_quantity||0), 0) : 0,
-          price: minPrice === 9999999 ? 0 : minPrice,
+          available_quantity: totalStock,
+          price: minPrice,
           permalink,
           thumbnail,
           status: hasStock ? 'active' : 'paused',
